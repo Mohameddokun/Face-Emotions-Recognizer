@@ -1,10 +1,8 @@
 streamlit
 ultralytics
-tensorflow-cpu==2.19.0
-opencv-python-headless
-numpy
+tensorflow-cpu==2.15.0
+numpy<2.0.0
 pandas
-mediapipe
 pillow
 streamlit-webrtc
 av
