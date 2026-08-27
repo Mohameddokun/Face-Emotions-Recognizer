@@ -1,8 +1,8 @@
 import os
 import cv2
+import tempfile
 import numpy as np
 import streamlit as st
-from PIL import Image
 from ultralytics import YOLO
 import tensorflow as tf
 from tensorflow.keras.models import load_model
@@ -32,8 +32,7 @@ def load_models():
 
 face_model, emotion_model = load_models()
 
-def process_image(image_np, conf_thresh):
-    rgb_frame = image_np.copy()
+def process_frame(rgb_frame, conf_thresh):
     h, w, _ = rgb_frame.shape
     results = face_model.predict(rgb_frame, conf=conf_thresh, imgsz=640, verbose=False)
 
@@ -63,23 +62,48 @@ def process_image(image_np, conf_thresh):
                     cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 0, 0), 2)
     return rgb_frame
 
-st.title("🎭 AI Face & Emotion Detector")
+st.title("🎭 AI Face & Emotion Video Detector")
 
 st.sidebar.title("Settings")
 conf_thresh = st.sidebar.slider("Face Detection Confidence", 0.1, 1.0, 0.40, 0.05)
-mode = st.sidebar.radio("Select Mode", ["Upload Image / Take Snapshot", "Live Local Webcam"])
+mode = st.sidebar.radio("Select Mode", ["Upload Video", "Live Local Webcam"])
 
-if mode == "Upload Image / Take Snapshot":
-    img_file = st.camera_input("Take a Photo") or st.file_uploader("Or Upload an Image", type=["jpg", "jpeg", "png"])
-    if img_file is not None:
-        image = Image.open(img_file).convert("RGB")
-        img_np = np.array(image)
-        output_frame = process_image(img_np, conf_thresh)
-        st.image(output_frame, caption="Processed Image", use_container_width=True)
+if mode == "Upload Video":
+    video_file = st.file_uploader("Upload a Video File", type=["mp4", "avi", "mov"])
+    
+    if video_file is not None:
+        # Save the uploaded video to a temporary file
+        tfile = tempfile.NamedTemporaryFile(delete=False)
+        tfile.write(video_file.read())
+        
+        # UI Elements for video playback
+        start_processing = st.button("▶️ Process Video")
+        stop_processing = st.button("⏹️ Stop")
+        frame_window = st.empty()  # Placeholder for the video stream
+        
+        if start_processing:
+            cap = cv2.VideoCapture(tfile.name)
+            
+            while cap.isOpened() and not stop_processing:
+                ret, frame = cap.read()
+                if not ret:
+                    st.success("Video processing complete!")
+                    break
+                
+                # Convert BGR to RGB for processing and displaying
+                rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+                
+                # Run the AI models on the frame
+                processed_frame = process_frame(rgb, conf_thresh)
+                
+                # Render the processed frame to the Streamlit UI
+                frame_window.image(processed_frame)
+                
+            cap.release()
 
 elif mode == "Live Local Webcam":
     start_cam = st.toggle("Start Camera", value=False)
-    frame_window = st.image([])
+    frame_window = st.empty()
     if start_cam:
         cap = cv2.VideoCapture(0)
         while start_cam:
@@ -88,6 +112,6 @@ elif mode == "Live Local Webcam":
                 st.error("Cannot access camera.")
                 break
             rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-            processed = process_image(rgb, conf_thresh)
+            processed = process_frame(rgb, conf_thresh)
             frame_window.image(processed)
         cap.release()
