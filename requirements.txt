@@ -5,3 +5,6 @@ opencv-python-headless
 numpy
 pandas
 mediapipe
+pillow
+streamlit-webrtc
+av
