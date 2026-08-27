@@ -1,15 +1,4 @@
 import os
-import subprocess
-import sys
-
-# --- STREAMLIT CLOUD OPENCV FIX ---
-# Ultralytics forces the GUI version of OpenCV. This uninstalls it 
-# and locks in the headless version to prevent libGL/libgthread crashes.
-if not os.path.exists("/tmp/opencv_fixed.txt"):
-    subprocess.run([sys.executable, "-m", "pip", "uninstall", "-y", "opencv-python", "opencv-contrib-python"])
-    subprocess.run([sys.executable, "-m", "pip", "install", "opencv-python-headless"])
-    with open("/tmp/opencv_fixed.txt", "w") as f:
-        f.write("fixed")
 import cv2
 import tempfile
 import numpy as np
