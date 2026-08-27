@@ -1,6 +1,6 @@
 streamlit
 ultralytics
-tensorflow-cpu
+tensorflow-cpu==2.19.0
 opencv-python-headless
 numpy
 pandas
