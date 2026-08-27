@@ -1,90 +1,144 @@
+import os
+import urllib.request
 import cv2
 import numpy as np
+import mediapipe as mp
 import streamlit as st
 import av
 from streamlit_webrtc import webrtc_streamer, WebRtcMode, RTCConfiguration
+from mediapipe.tasks import python
+from mediapipe.tasks.python import vision
 from ultralytics import YOLO
-import tensorflow as tf
-from tensorflow.keras.models import load_model
-from tensorflow.keras.applications.mobilenet_v2 import preprocess_input
 
-st.set_page_config(page_title="Live Face & Emotion Recognition", layout="wide")
+st.set_page_config(page_title="Live Expression & Face Detector", layout="wide")
 
-EMOTIONS = ["angry", "disgust", "fear", "happy", "neutral", "sad", "surprise"]
-COLOR_MAP = {
-    "angry": (50, 50, 255),       # BGR formats for OpenCV drawing
-    "disgust": (20, 70, 140),
-    "fear": (226, 43, 138),
-    "happy": (0, 220, 0),
-    "neutral": (255, 200, 0),
-    "sad": (255, 144, 30),
-    "surprise": (0, 165, 255)
-}
+# 1. Download official MediaPipe Face Landmarker Task model if missing
+MODEL_PATH = "face_landmarker.task"
+MODEL_URL = "https://storage.googleapis.com/mediapipe-models/face_landmarker/face_landmarker/float16/latest/face_landmarker.task"
 
-# 1. Load Models (Cached so they only load once)
-@st.cache_resource(show_spinner=False)
+@st.cache_resource(show_spinner=True)
 def load_models():
-    face_model = YOLO("best.pt")
-    emotion_model = load_model(
-        "best_emotion_model_scratch_enhanced.keras",
-        custom_objects={"preprocess_input": preprocess_input}
+    if not os.path.exists(MODEL_PATH):
+        urllib.request.urlretrieve(MODEL_URL, MODEL_PATH)
+
+    # 2. Initialize MediaPipe Face Landmarker with Blendshapes enabled
+    base_options = python.BaseOptions(model_asset_path=MODEL_PATH)
+    options = vision.FaceLandmarkerOptions(
+        base_options=base_options,
+        output_face_blendshapes=True,
+        output_facial_transformation_matrixes=False,
+        num_faces=1
     )
-    return face_model, emotion_model
+    detector = vision.FaceLandmarker.create_from_options(options)
 
-face_model, emotion_model = load_models()
+    # 3. Load YOLO model
+    yolo_model = YOLO('best.pt')
+    
+    return detector, yolo_model
 
-st.title("🎭 Live AI Face & Emotion Detector")
-st.markdown("Ensure your browser allows camera access. The video processes in real-time on the cloud.")
+detector, yolo_model = load_models()
 
-# 2. Define the Frame Processing Callback
+st.title("🎭 Live YOLOv8 + MediaPipe Expression Detector")
+st.markdown("Ensure your browser allows camera access. The video streams and processes in real-time.")
+
+# 4. WebRTC Video Frame Callback
 def video_frame_callback(frame: av.VideoFrame) -> av.VideoFrame:
-    # Convert WebRTC frame to OpenCV BGR format
+    # Convert incoming WebRTC frame to standard OpenCV BGR format
     img = frame.to_ndarray(format="bgr24")
     h, w, _ = img.shape
 
-    # Face Detection (Hardcoded conf=0.40 for thread safety)
-    results = face_model.predict(img, conf=0.40, imgsz=640, verbose=False)
+    # Extract facial blendshape scores via MediaPipe
+    rgb_frame = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+    mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb_frame)
+    detection_result = detector.detect(mp_image)
 
-    for person_id, box in enumerate(results[0].boxes.xyxy, start=1):
-        x1, y1, x2, y2 = map(int, box)
-        x1, y1 = max(0, x1), max(0, y1)
-        x2, y2 = min(w, x2), min(h, y2)
+    state = "Neutral"
+    color = (255, 255, 0) # Cyan
 
-        face = img[y1:y2, x1:x2]
-        if face.size == 0 or face.shape[0] < 12 or face.shape[1] < 12:
-            continue
+    blink_score = 0.0
+    smile_score = 0.0
+    angry_score = 0.0
+    mouth_open = 0.0
 
-        # Convert face crop from BGR to RGB for the Keras model
-        face_rgb = cv2.cvtColor(face, cv2.COLOR_BGR2RGB)
-        face_input = cv2.resize(face_rgb, (48, 48)).astype("float32") / 255.0
-        face_input = np.expand_dims(face_input, axis=0)
+    if detection_result.face_blendshapes:
+        blendshapes = {
+            b.category_name: b.score for b in detection_result.face_blendshapes[0]
+        }
 
-        # Emotion Prediction
-        preds = emotion_model(face_input, training=False).numpy()[0]
-        emotion_idx = int(np.argmax(preds))
-        confidence = float(preds[emotion_idx])
-        emotion_name = EMOTIONS[emotion_idx]
+        # Individual feature values
+        blink_l = blendshapes.get('eyeBlinkLeft', 0)
+        blink_r = blendshapes.get('eyeBlinkRight', 0)
+        blink_score = (blink_l + blink_r) / 2.0
 
-        display_label = f"Person {person_id}: {emotion_name.upper()} ({confidence * 100:.1f}%)"
-        box_color = COLOR_MAP.get(emotion_name, (0, 255, 0))
+        smile_l = blendshapes.get('mouthSmileLeft', 0)
+        smile_r = blendshapes.get('mouthSmileRight', 0)
+        smile_score = (smile_l + smile_r) / 2.0
 
-        # Draw Bounding Box and Label directly onto the image
-        cv2.rectangle(img, (x1, y1), (x2, y2), box_color, 2)
-        cv2.rectangle(img, (x1, max(0, y1 - 32)), (x1 + len(display_label) * 12, max(30, y1)), box_color, -1)
-        cv2.putText(img, display_label, (x1 + 6, max(22, y1 - 10)),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 0, 0), 2)
+        mouth_open = blendshapes.get('jawOpen', 0)
 
-    # Return the processed frame to the browser
+        # Multi-factor Anger Calculation
+        brow_down = (blendshapes.get('browDownLeft', 0) + blendshapes.get('browDownRight', 0)) / 2.0
+        squint = (blendshapes.get('eyeSquintLeft', 0) + blendshapes.get('eyeSquintRight', 0)) / 2.0
+        frown = (blendshapes.get('mouthFrownLeft', 0) + blendshapes.get('mouthFrownRight', 0)) / 2.0
+        nose_sneer = (blendshapes.get('noseSneerLeft', 0) + blendshapes.get('noseSneerRight', 0)) / 2.0
+
+        # Weighted composite score
+        angry_score = (brow_down * 0.55) + (squint * 0.25) + (frown * 0.10) + (nose_sneer * 0.10)
+
+        # Expression State Hierarchy (Tested thresholds)
+        if blink_score > 0.45:
+            state = "Blinking / Eyes Closed"
+            color = (255, 120, 0)  # Blue
+        elif angry_score > 0.18:
+            state = "Angry >:("
+            color = (0, 0, 255)    # Red
+        elif smile_score > 0.35:
+            state = "Smiling :)"
+            color = (0, 255, 0)    # Green
+        elif mouth_open > 0.35:
+            state = "Mouth Open :O"
+            color = (0, 165, 255)  # Orange
+        else:
+            state = "Neutral"
+            color = (255, 255, 0)  # Cyan
+
+    # 5. Detect face bounding box using YOLO
+    results = yolo_model.predict(img, conf=0.35, imgsz=640, verbose=False)
+
+    for r in results:
+        for box in r.boxes:
+            x1, y1, x2, y2 = map(int, box.xyxy[0])
+            x1, y1 = max(0, x1), max(0, y1)
+            x2, y2 = min(w, x2), min(h, y2)
+
+            # Draw bounding box
+            cv2.rectangle(img, (x1, y1), (x2, y2), color, 2)
+
+            # Draw state badge
+            label = f"State: {state}"
+            cv2.rectangle(img, (x1, max(0, y1 - 32)), (x1 + len(label) * 14, max(30, y1)), color, -1)
+            cv2.putText(img, label, (x1 + 6, max(22, y1 - 10)),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 0), 2)
+
+    # 6. Live Debug HUD (Top-Left Corner)
+    hud_bg = (30, 30, 30)
+    cv2.rectangle(img, (10, 10), (280, 130), hud_bg, -1)
+    cv2.putText(img, f"Angry Score : {angry_score:.2f} (Target > 0.18)", (20, 35), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (0, 0, 255) if angry_score > 0.18 else (200, 200, 200), 1)
+    cv2.putText(img, f"Blink Score : {blink_score:.2f} (Target > 0.45)", (20, 60), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (255, 120, 0) if blink_score > 0.45 else (200, 200, 200), 1)
+    cv2.putText(img, f"Smile Score : {smile_score:.2f} (Target > 0.35)", (20, 85), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (0, 255, 0) if smile_score > 0.35 else (200, 200, 200), 1)
+    cv2.putText(img, f"Mouth Open  : {mouth_open:.2f} (Target > 0.35)", (20, 110), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (0, 165, 255) if mouth_open > 0.35 else (200, 200, 200), 1)
+
+    # Return the processed frame to the Streamlit UI
     return av.VideoFrame.from_ndarray(img, format="bgr24")
 
-# 3. Setup STUN server to guarantee peer-to-peer connection over strict firewalls
+# Setup STUN server for cloud deployment
 RTC_CONFIGURATION = RTCConfiguration(
     {"iceServers": [{"urls": ["stun:stun.l.google.com:19302"]}]}
 )
 
-# 4. Mount the WebRTC Streamer UI Component
+# Streamlit WebRTC Component
 webrtc_streamer(
-    key="emotion-detection",
+    key="mediapipe-expression-detection",
     mode=WebRtcMode.SENDRECV,
     rtc_configuration=RTC_CONFIGURATION,
     video_frame_callback=video_frame_callback,
