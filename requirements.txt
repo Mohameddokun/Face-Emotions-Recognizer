@@ -1,6 +1,6 @@
 streamlit
 ultralytics
-opencv-python-headless
+tensorflow-cpu==2.15.0
 numpy<2.0.0
 streamlit-webrtc
 av
